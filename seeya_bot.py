@@ -382,8 +382,7 @@ async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     # ⚠️ REPLACE WITH YOUR NEW TOKEN
-    TOKEN = "YOUR_NEW_BOT_TOKEN_HERE" 
-
+    TOKEN = "8874296819:AAH249JwMBWsIMiIFnNP7XcclbcGLmJpD60" 
     app = Application.builder().token(TOKEN).build()
 
     # Basic Commands
