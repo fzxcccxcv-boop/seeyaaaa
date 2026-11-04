@@ -238,6 +238,8 @@ def main_kb(uid: int) -> InlineKeyboardMarkup:
     kb.add(
         ColoredButton("🌸 Ping", callback_data="ping", style="success"),
         ColoredButton("💮 Bot Status", callback_data="info", style="primary"),
+        ColoredButton("📊 System Stats", callback_data="stats", style="primary"),
+        ColoredButton("ℹ️ Help & About", callback_data="help", style="primary"),
     )
     if is_owner(uid):
         kb.add(ColoredButton("👑 Script Owner Panel", callback_data="owner_panel", style="danger"))
@@ -246,14 +248,14 @@ def main_kb(uid: int) -> InlineKeyboardMarkup:
 @bot.message_handler(commands=["start", "help"])
 def start_cmd(message):
     uid = message.from_user.id
-    role = "👑 <b>Bot Owner (Full Control)</b>" if is_owner(uid) else "🌷 <b>User</b>"
+    role = "👑 <b>Bot Owner</b>" if is_owner(uid) else "🌷 <b>User</b>"
     text = (
         f"╭─── 🌸 <b>Hosted by {{HOSTER_NAME}}</b> 🌸 ───╮\\n"
-        f"│ 👤 <b>User:</b> {{message.from_user.first_name}}\\n"
+        f"│ 👤 <b>Welcome,</b> {{message.from_user.first_name}}!\\n"
         f"│ 🆔 <b>Your ID:</b> <code>{{uid}}</code>\\n"
-        f"│ 👑 <b>Bot Owner ID:</b> <code>{{OWNER_ID}}</code>\\n"
+        f"│ 👑 <b>Owner ID:</b> <code>{{OWNER_ID}}</code>\\n"
         f"│ 🎖️ <b>Role:</b> {{role}}\\n"
-        f"│ ⛩️ <b>Hoster Owner:</b> {{MASTER_OWNER}}\\n"
+        f"│ ⛩️ <b>Hoster:</b> {{MASTER_OWNER}}\\n"
         f"╰──────────────────────────────╯"
     )
     bot.send_message(message.chat.id, text, reply_markup=main_kb(uid))
@@ -281,6 +283,19 @@ def cb_handler(call):
         bot.answer_callback_query(
             call.id,
             f"🤖 @{{me.username}} | Owner: {{OWNER_ID}} | Hosted by {{HOSTER_NAME}} ({{MASTER_OWNER}})",
+            show_alert=True,
+        )
+    elif call.data == "stats":
+        bot.answer_callback_query(
+            call.id,
+            f"📊 Python: {{platform.python_version()}} | Uptime: {{get_uptime()}} | PID: {{os.getpid()}}",
+            show_alert=True,
+        )
+    elif call.data == "help":
+        bot.answer_callback_query(
+            call.id,
+            f"ℹ️ This is a hosted bot running on {{HOSTER_NAME}} cloud engine.\\n"
+            f"Owner: {{OWNER_ID}} | Master: {{MASTER_OWNER}}",
             show_alert=True,
         )
     elif call.data == "owner_panel":
@@ -691,6 +706,11 @@ def build_isolated_runner(
         f"# Assigned Bot Owner Chat ID: {owner_chat_id} | RAM Cap: {max_ram_mb} MB\n"
         f"# =====================================================================\n"
         f"import os as _sid_os, sys as _sid_sys\n"
+        f"try:\n"
+        f"    _sid_sys.stdout = open('runtime.log', 'a', encoding='utf-8', errors='replace')\n"
+        f"    _sid_sys.stderr = _sid_sys.stdout\n"
+        f"except Exception:\n"
+        f"    pass\n"
         f"if _sid_os.name == 'nt':\n"
         f"    try:\n"
         f"        _sid_sys.stdout.reconfigure(encoding='utf-8', errors='replace')\n"
@@ -856,13 +876,12 @@ def start_user_bot_process(user_id: int, bot_id: str) -> Tuple[bool, str]:
 
             log_path = os.path.join(workspace, "runtime.log")
             rotate_log_if_needed(log_path)
-            log_file = open(log_path, "a", encoding="utf-8", errors="replace", buffering=1)
-            log_file.write(
-                f"\n--- [🌸 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                f"Starting @{bot_meta['bot_username']} | Owner ID: {owner_chat_id} | "
-                f"Hosted by {BOT_BRAND} ({MASTER_OWNER_TAG}) ---\n"
-            )
-            log_file.flush()
+            with open(log_path, "a", encoding="utf-8", errors="replace") as f:
+                f.write(
+                    f"\n--- [🌸 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                    f"Starting @{bot_meta['bot_username']} | Owner ID: {owner_chat_id} | "
+                    f"Hosted by {BOT_BRAND} ({MASTER_OWNER_TAG}) ---\n"
+                )
 
             env = os.environ.copy()
             env["BOT_TOKEN"] = bot_token
@@ -875,7 +894,6 @@ def start_user_bot_process(user_id: int, bot_id: str) -> Tuple[bool, str]:
             env["PYTHONUNBUFFERED"] = "1"
             env["PYTHONIOENCODING"] = "utf-8"
 
-            # On Windows RDP, hide console windows so hosted bots run silently in background
             creation_flags = 0
             if IS_WINDOWS:
                 creation_flags = (
@@ -887,17 +905,11 @@ def start_user_bot_process(user_id: int, bot_id: str) -> Tuple[bool, str]:
                 [sys.executable, "-u", runner_path],
                 cwd=workspace,
                 env=env,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
                 creationflags=creation_flags,
             )
-
-            # Close parent's file handle so Windows RDP does not lock runtime.log with WinError 32
-            try:
-                log_file.close()
-            except Exception:
-                pass
 
             ACTIVE_PROCESSES[f"{user_id}:{bot_id}"] = proc
             bot_meta["pid"] = proc.pid
