@@ -9,9 +9,12 @@
     "auto_brand_bots": true,
     "colored_buttons": true,
     "max_bots_per_user": 10,
+    "max_ram_mb_per_bot": 150,
+    "max_cpu_percent_per_bot": 85.0,
+    "oom_kills_count": 0,
     "master_script_path": "engine_payload/master_script.py",
     "total_deployments": 0,
-    "last_updated": "2026-11-04T15:14:00"
+    "last_updated": "2026-11-04T15:30:00"
   },
   "users": {}
 }
