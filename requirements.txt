@@ -1,3 +1,4 @@
-python-telegram-bot>=20.0
-Pillow>=9.0.0
-yt-dlp
+pyTelegramBotAPI>=4.22.1
+psutil>=6.0.0
+requests>=2.32.3
+urllib3>=2.2.2
