@@ -1,6 +1,9 @@
 {
   "telebot": "pyTelegramBotAPI",
   "telegram": "python-telegram-bot",
+  "pyrogram": "pyrogram",
+  "aiogram": "aiogram",
+  "telethon": "telethon",
   "PIL": "Pillow",
   "cv2": "opencv-python",
   "bs4": "beautifulsoup4",
@@ -15,5 +18,11 @@
   "jwt": "PyJWT",
   "websocket": "websocket-client",
   "nacl": "PyNaCl",
-  "git": "GitPython"
+  "git": "GitPython",
+  "pymongo": "pymongo",
+  "motor": "motor",
+  " yt_dlp": "yt-dlp",
+  "OpenSSL": "pyOpenSSL",
+  "socks": "PySocks",
+  " magic": "python-magic"
 }
