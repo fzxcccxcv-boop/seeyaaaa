@@ -61,6 +61,9 @@ DEFAULT_CONFIG_JSON = {
 DEFAULT_PACKAGES_MAP_JSON = {
     "telebot": "pyTelegramBotAPI",
     "telegram": "python-telegram-bot",
+    "pyrogram": "pyrogram",
+    "telethon": "Telethon",
+    "aiogram": "aiogram",
     "PIL": "Pillow",
     "cv2": "opencv-python",
     "bs4": "beautifulsoup4",
@@ -299,6 +302,7 @@ def cb_handler(call):
         )
 
 if __name__ == "__main__":
+    print(f"[🌸 Hosted Bot Online] Polling started for Owner ID {{OWNER_ID}}...")
     bot.infinity_polling(timeout=20, long_polling_timeout=10, skip_pending=True)
 '''
     with open(DEFAULT_MASTER_SCRIPT, "w", encoding="utf-8") as f:
@@ -493,7 +497,7 @@ def get_stdlib_modules() -> Set[str]:
         "traceback", "platform", "signal", "uuid", "tempfile", "zipfile",
         "tarfile", "gzip", "pickle", "struct", "ctypes", "enum", "dataclasses",
         "abc", "contextlib", "inspect", "importlib", "ast", "queue", "string",
-        "winreg", "msvcrt", "winsound", "ntpath"
+        "winreg", "msvcrt", "winsound", "ntpath", "__future__"
     })
     return stdlib
 
@@ -671,57 +675,107 @@ def build_isolated_runner(
     with open(src_path, "r", encoding="utf-8", errors="ignore") as f:
         raw_code = f.read()
 
-    patched = raw_code.replace("__BOT_TOKEN__", bot_token)
+    # 1. Extract any `from __future__ import ...` lines so they stay at the very top of runner.py
+    future_lines: List[str] = []
+    remaining_lines: List[str] = []
+    for line in raw_code.splitlines():
+        if re.match(r"^\s*from\s+__future__\s+import\s+", line):
+            future_lines.append(line)
+        else:
+            remaining_lines.append(line)
+    patched = "\n".join(remaining_lines)
+
+    # 2. Replace standard placeholders
+    for placeholder in ("__BOT_TOKEN__", "YOUR_BOT_TOKEN_HERE", "YOUR_BOT_TOKEN", "BOT_TOKEN_HERE"):
+        patched = patched.replace(placeholder, bot_token)
     patched = patched.replace("__OWNER_ID__", str(owner_chat_id))
-    patched = patched.replace("YOUR_BOT_TOKEN", bot_token)
-    patched = patched.replace("YOUR_BOT_TOKEN_HERE", bot_token)
 
+    # 3. Replace ANY hardcoded Telegram Bot Token pattern anywhere in the script
     patched = re.sub(
-        r'^(BOT_TOKEN|TOKEN|API_TOKEN|TELEGRAM_TOKEN)\s*=\s*["\'][^"\']*["\']',
-        f'\\1 = "{bot_token}"',
+        r'(["\'])\d{6,12}:[A-Za-z0-9_-]{30,50}(["\'])',
+        lambda m: f"{m.group(1)}{bot_token}{m.group(2)}",
         patched,
-        flags=re.MULTILINE,
-    )
-    patched = re.sub(
-        r'^(OWNER_ID|ADMIN_ID|OWNER|ADMIN|SUDO_ID)\s*=\s*\d+',
-        f'\\1 = {owner_chat_id}',
-        patched,
-        flags=re.MULTILINE,
     )
 
-    # 🌸 CRITICAL FIX: Redirect stderr properly to catch startup crashes
+    # 4. Replace token variable assignments (case-insensitive, supports indentation & type hints)
+    patched = re.sub(
+        r'^(\s*(?:BOT_TOKEN|TOKEN|API_TOKEN|TELEGRAM_TOKEN|TG_TOKEN|BOT_KEY)\s*(?::\s*[^=]+)?=\s*)(?:["\'][^"\']*["\'])',
+        lambda m: f'{m.group(1)}"{bot_token}"',
+        patched,
+        flags=re.MULTILINE | re.IGNORECASE,
+    )
+
+    # 5. Replace Owner/Admin ID assignments (supports ints, strings, and single-item lists)
+    patched = re.sub(
+        r'^(\s*(?:OWNER_ID|ADMIN_ID|OWNER|ADMIN|SUDO_ID|MASTER_ID|OWNER_CHAT_ID)\s*(?::\s*[^=]+)?=\s*)(?:["\']?\d+["\']?)',
+        lambda m: f"{m.group(1)}{owner_chat_id}",
+        patched,
+        flags=re.MULTILINE | re.IGNORECASE,
+    )
+    patched = re.sub(
+        r'^(\s*(?:OWNERS|ADMINS|ADMIN_IDS|OWNER_IDS|SUDO_USERS)\s*(?::\s*[^=]+)?=\s*)\[\s*\d+(?:\s*,\s*\d+)*\s*\]',
+        lambda m: f"{m.group(1)}[{owner_chat_id}]",
+        patched,
+        flags=re.MULTILINE | re.IGNORECASE,
+    )
+
+    future_header = ("\n".join(future_lines) + "\n") if future_lines else ""
+
+    # 6. Runtime Bootstrap Header: Forces env vars, sys.path, unbuffered UTF-8 logs,
+    #    and hooks TeleBot / PTB / Aiogram / Pyrogram so the hosted token is ALWAYS used!
     bootstrap_header = (
+        f"{future_header}"
         f"# =====================================================================\n"
         f"# 🌸 {BOT_BRAND.upper()} ISOLATED SESSION RUNNER (RDP + LINUX)\n"
         f"# Hosted by {BOT_BRAND} | Master Owner: {MASTER_OWNER_TAG}\n"
         f"# Assigned Bot Owner Chat ID: {owner_chat_id} | RAM Cap: {max_ram_mb} MB\n"
         f"# =====================================================================\n"
         f"import os as _sid_os, sys as _sid_sys\n"
+        f"_sid_payload_dir = {json.dumps(PAYLOAD_DIR)}\n"
+        f"if _sid_payload_dir not in _sid_sys.path:\n"
+        f"    _sid_sys.path.insert(0, _sid_payload_dir)\n"
         f"try:\n"
-        f"    _sid_sys.stdout = open('runtime.log', 'a', encoding='utf-8', errors='replace')\n"
-        f"    _sid_sys.stderr = _sid_sys.stdout\n"
+        f"    _sid_sys.stdout.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)\n"
+        f"    _sid_sys.stderr.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)\n"
         f"except Exception:\n"
         f"    pass\n"
-        f"if _sid_os.name == 'nt':\n"
-        f"    try:\n"
-        f"        _sid_sys.stdout.reconfigure(encoding='utf-8', errors='replace')\n"
-        f"        _sid_sys.stderr.reconfigure(encoding='utf-8', errors='replace')\n"
-        f"    except Exception:\n"
-        f"        pass\n"
-        f"try:\n"
-        f"    import resource as _sid_res\n"
-        f"    _heap_cap = int({max_ram_mb} * 2 * 1024 * 1024)\n"
-        f"    _sid_res.setrlimit(_sid_res.RLIMIT_DATA, (_heap_cap, _heap_cap))\n"
-        f"except Exception:\n"
-        f"    pass\n"
-        f"_sid_os.environ['BOT_TOKEN'] = {json.dumps(bot_token)}\n"
-        f"_sid_os.environ['TOKEN'] = {json.dumps(bot_token)}\n"
-        f"_sid_os.environ['OWNER_ID'] = {json.dumps(str(owner_chat_id))}\n"
-        f"_sid_os.environ['ADMIN_ID'] = {json.dumps(str(owner_chat_id))}\n"
-        f"_sid_os.environ['SUDO_USERS'] = {json.dumps(str(owner_chat_id))}\n"
+        f"_SID_FORCED_TOKEN = {json.dumps(bot_token)}\n"
+        f"_SID_FORCED_OWNER = {int(owner_chat_id)}\n"
+        f"_sid_os.environ['BOT_TOKEN'] = _SID_FORCED_TOKEN\n"
+        f"_sid_os.environ['TOKEN'] = _SID_FORCED_TOKEN\n"
+        f"_sid_os.environ['API_TOKEN'] = _SID_FORCED_TOKEN\n"
+        f"_sid_os.environ['TELEGRAM_TOKEN'] = _SID_FORCED_TOKEN\n"
+        f"_sid_os.environ['OWNER_ID'] = str(_SID_FORCED_OWNER)\n"
+        f"_sid_os.environ['ADMIN_ID'] = str(_SID_FORCED_OWNER)\n"
+        f"_sid_os.environ['SUDO_USERS'] = str(_SID_FORCED_OWNER)\n"
         f"_sid_os.environ['HOSTER_NAME'] = {json.dumps(BOT_BRAND)}\n"
         f"_sid_os.environ['MASTER_OWNER'] = {json.dumps(MASTER_OWNER_TAG)}\n"
-        f"_sid_os.environ['MAX_RAM_MB'] = {json.dumps(str(max_ram_mb))}\n\n"
+        f"_sid_os.environ['MAX_RAM_MB'] = {json.dumps(str(max_ram_mb))}\n"
+        f"# Runtime Hook: Ensure TeleBot / PTB / Aiogram always receive the hosted token\n"
+        f"try:\n"
+        f"    import telebot as _sid_tb\n"
+        f"    _orig_tb_init = _sid_tb.TeleBot.__init__\n"
+        f"    def _patched_tb_init(self, token=None, *args, **kwargs):\n"
+        f"        return _orig_tb_init(self, _SID_FORCED_TOKEN, *args, **kwargs)\n"
+        f"    _sid_tb.TeleBot.__init__ = _patched_tb_init\n"
+        f"except Exception:\n"
+        f"    pass\n"
+        f"try:\n"
+        f"    from telegram.ext import ApplicationBuilder as _sid_ab\n"
+        f"    _orig_ab_token = _sid_ab.token\n"
+        f"    def _patched_ab_token(self, token):\n"
+        f"        return _orig_ab_token(self, _SID_FORCED_TOKEN)\n"
+        f"    _sid_ab.token = _patched_ab_token\n"
+        f"except Exception:\n"
+        f"    pass\n"
+        f"try:\n"
+        f"    import aiogram as _sid_aio\n"
+        f"    _orig_aio_init = _sid_aio.Bot.__init__\n"
+        f"    def _patched_aio_init(self, token=None, *args, **kwargs):\n"
+        f"        return _orig_aio_init(self, _SID_FORCED_TOKEN, *args, **kwargs)\n"
+        f"    _sid_aio.Bot.__init__ = _patched_aio_init\n"
+        f"except Exception:\n"
+        f"    pass\n\n"
     )
 
     runner_path = os.path.join(target_workspace, "runner.py")
@@ -867,16 +921,21 @@ def start_user_bot_process(user_id: int, bot_id: str) -> Tuple[bool, str]:
 
             log_path = os.path.join(workspace, "runtime.log")
             rotate_log_if_needed(log_path)
-            with open(log_path, "a", encoding="utf-8", errors="replace") as f:
-                f.write(
-                    f"\n--- [🌸 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                    f"Starting @{bot_meta['bot_username']} | Owner ID: {owner_chat_id} | "
-                    f"Hosted by {BOT_BRAND} ({MASTER_OWNER_TAG}) ---\n"
-                )
+
+            # Open runtime.log and pass handle directly to Popen so SyntaxErrors & tracebacks are captured
+            log_fh = open(log_path, "a", encoding="utf-8", errors="replace", buffering=1)
+            log_fh.write(
+                f"\n--- [🌸 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                f"Starting @{bot_meta['bot_username']} | Owner ID: {owner_chat_id} | "
+                f"Hosted by {BOT_BRAND} ({MASTER_OWNER_TAG}) ---\n"
+            )
+            log_fh.flush()
 
             env = os.environ.copy()
             env["BOT_TOKEN"] = bot_token
             env["TOKEN"] = bot_token
+            env["API_TOKEN"] = bot_token
+            env["TELEGRAM_TOKEN"] = bot_token
             env["OWNER_ID"] = str(owner_chat_id)
             env["ADMIN_ID"] = str(owner_chat_id)
             env["SUDO_USERS"] = str(owner_chat_id)
@@ -892,22 +951,36 @@ def start_user_bot_process(user_id: int, bot_id: str) -> Tuple[bool, str]:
                     | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
                 )
 
-            proc = subprocess.Popen(
-                [sys.executable, "-u", runner_path],
-                cwd=workspace,
-                env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-                creationflags=creation_flags,
-            )
+            try:
+                proc = subprocess.Popen(
+                    [sys.executable, "-u", runner_path],
+                    cwd=workspace,
+                    env=env,
+                    stdout=log_fh,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    creationflags=creation_flags,
+                )
+            finally:
+                # Close parent's file descriptor so child owns it and Windows RDP never locks runtime.log
+                try:
+                    log_fh.close()
+                except Exception:
+                    pass
 
-            # 🌸 CRITICAL FIX: Wait 3 seconds to ensure the bot actually starts
-            # if it crashes immediately, the runner.py will catch it and write to runtime.log
-            time.sleep(3)
+            # Wait 2.5 seconds to verify the process doesn't crash on import/startup
+            time.sleep(2.5)
 
             if not is_pid_running(proc.pid):
-                return False, "🥀 Process crashed immediately upon launch. Check Live Logs for details."
+                bot_meta["pid"] = None
+                bot_meta["status"] = "crashed"
+                db.add_or_update_bot(user_id, bot_id, bot_meta)
+                crash_tail = ""
+                if os.path.exists(log_path):
+                    with open(log_path, "r", encoding="utf-8", errors="ignore") as rf:
+                        crash_tail = "".join(rf.readlines()[-12:]).strip()[-600:]
+                err_detail = f"\n<pre>{telebot.formatting.escape_html(crash_tail)}</pre>" if crash_tail else ""
+                return False, f"🥀 Process crashed on startup. Check Live Logs:{err_detail}"
 
             ACTIVE_PROCESSES[f"{user_id}:{bot_id}"] = proc
             bot_meta["pid"] = proc.pid
@@ -930,8 +1003,7 @@ def stop_user_bot_process(user_id: int, bot_id: str) -> Tuple[bool, str]:
         kill_process_tree(pid)
         ACTIVE_PROCESSES.pop(f"{user_id}:{bot_id}", None)
 
-        # 🌸 CRITICAL FIX: Wait for Telegram to drop the old connection before restarting
-        time.sleep(2)
+        time.sleep(1.0)
 
         bot_meta["pid"] = None
         bot_meta["status"] = "stopped"
@@ -1206,6 +1278,8 @@ def render_bot_control_card(user_id: int, bot_id: str) -> Tuple[str, Optional[In
     status_label = tele["status"]
     if not alive and bmeta.get("status") == "oom_stopped":
         status_label = "💀 OOM Stopped (Exceeded RAM Cap)"
+    elif not alive and bmeta.get("status") == "crashed":
+        status_label = "🥀 Crashed on Startup (Check Logs)"
 
     text = (
         f"{sakura_header('Bot Session Control Center')}\n\n"
@@ -1508,8 +1582,13 @@ def deploy_bot_for_user(
     slots_used = len(updated_uinfo.get("bots", {}))
 
     card_text, card_kb = render_bot_control_card(user.id, bot_id)
-    header_notice = (
+    status_header = (
         f"✅ <b>Hosted Successfully! ({slots_used}/{max_slots} Slots)</b>\n"
+        if ok
+        else f"⚠️ <b>Bot Registered ({slots_used}/{max_slots} Slots), but Process Exited!</b>\n"
+    )
+    header_notice = (
+        f"{status_header}"
         f"{start_msg}\n"
         f"🏷️ <b>Bot Bio Updated:</b> <code>Hosted by {BOT_BRAND} | Owner: {MASTER_OWNER_TAG}</code>\n"
         f"👑 <b>Your Script Owner ID:</b> <code>{owner_chat_id}</code>\n\n"
@@ -1975,22 +2054,26 @@ def handle_callbacks(call: telebot.types.CallbackQuery):
         ok, msg = start_user_bot_process(uid, bid)
         text, kb = render_bot_control_card(uid, bid)
         bot.edit_message_text(text, chat_id, msg_id, reply_markup=kb)
-        bot.answer_callback_query(call.id, re.sub(r"<[^>]+>", "", msg), show_alert=not ok)
+        bot.answer_callback_query(call.id, re.sub(r"<[^>]+>", "", msg)[:180], show_alert=not ok)
 
     elif data.startswith("bot_stop:"):
         bid = data.split(":")[1]
         ok, msg = stop_user_bot_process(uid, bid)
         text, kb = render_bot_control_card(uid, bid)
         bot.edit_message_text(text, chat_id, msg_id, reply_markup=kb)
-        bot.answer_callback_query(call.id, re.sub(r"<[^>]+>", "", msg))
+        bot.answer_callback_query(call.id, re.sub(r"<[^>]+>", "", msg)[:180])
 
     elif data.startswith("bot_restart:"):
         bid = data.split(":")[1]
         stop_user_bot_process(uid, bid)
-        start_user_bot_process(uid, bid)
+        ok, msg = start_user_bot_process(uid, bid)
         text, kb = render_bot_control_card(uid, bid)
         bot.edit_message_text(text, chat_id, msg_id, reply_markup=kb)
-        bot.answer_callback_query(call.id, "🔄 Bot Restarted!")
+        bot.answer_callback_query(
+            call.id,
+            "🔄 Bot Restarted!" if ok else re.sub(r"<[^>]+>", "", msg)[:180],
+            show_alert=not ok,
+        )
 
     elif data.startswith("bot_stats:"):
         bid = data.split(":")[1]
@@ -2023,7 +2106,7 @@ def handle_callbacks(call: telebot.types.CallbackQuery):
         log_path = os.path.join(bmeta["workspace"], "runtime.log")
         if os.path.exists(log_path):
             with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
-                lines = f.readlines()[-30:]
+                lines = f.readlines()[-35:]
             log_tail = "".join(lines).strip()[-3200:] or "No output logged yet."
         else:
             log_tail = "Log file not generated yet."
