@@ -4,6 +4,8 @@
   "bot_brand": "sidbotxhoster",
   "master_owner_tag": "@s1dfr",
   "max_bots_per_user": 10,
+  "max_ram_mb_per_bot": 150,
+  "max_cpu_percent_per_bot": 85.0,
   "max_log_bytes": 2097152,
   "colored_buttons_enabled": true,
   "button_styles": {
