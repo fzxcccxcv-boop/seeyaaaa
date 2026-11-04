@@ -1,0 +1,19 @@
+{
+  "telebot": "pyTelegramBotAPI",
+  "telegram": "python-telegram-bot",
+  "PIL": "Pillow",
+  "cv2": "opencv-python",
+  "bs4": "beautifulsoup4",
+  "sklearn": "scikit-learn",
+  "yaml": "PyYAML",
+  "dotenv": "python-dotenv",
+  "Crypto": "pycryptodome",
+  "fitz": "PyMuPDF",
+  "dateutil": "python-dateutil",
+  "dns": "dnspython",
+  "serial": "pyserial",
+  "jwt": "PyJWT",
+  "websocket": "websocket-client",
+  "nacl": "PyNaCl",
+  "git": "GitPython"
+}
