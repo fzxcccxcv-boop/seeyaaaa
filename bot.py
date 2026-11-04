@@ -124,7 +124,6 @@ PROCESS_LOCK = threading.RLock()
 # 🌸 WINDOWS RDP SAFE FILE & DIRECTORY HELPERS
 # ============================================================================
 def windows_safe_replace(src: str, dst: str, retries: int = 5):
-    """Prevents transient Windows Defender / RDP file-lock errors during atomic JSON saves."""
     for attempt in range(retries):
         try:
             os.replace(src, dst)
@@ -141,7 +140,6 @@ def windows_safe_replace(src: str, dst: str, retries: int = 5):
 
 
 def windows_safe_rmtree(path: str, retries: int = 5):
-    """Safely removes isolated session folders on Windows RDP after killing child processes."""
     if not path or not os.path.exists(path):
         return
     for _ in range(retries):
@@ -157,14 +155,6 @@ def windows_safe_rmtree(path: str, retries: int = 5):
 # 🌸 TELEGRAM BOT API COLORED INLINE BUTTON ENGINE
 # ============================================================================
 class SakuraButton(InlineKeyboardButton):
-    """
-    Native Telegram Bot API Colored InlineKeyboardButton.
-    Supports `style`:
-      - "primary" (Blue)
-      - "success" (Green)
-      - "danger"  (Red)
-    """
-
     def __init__(
         self,
         text: str,
@@ -699,6 +689,7 @@ def build_isolated_runner(
         flags=re.MULTILINE,
     )
 
+    # 🌸 CRITICAL FIX: Redirect stderr properly to catch startup crashes
     bootstrap_header = (
         f"# =====================================================================\n"
         f"# 🌸 {BOT_BRAND.upper()} ISOLATED SESSION RUNNER (RDP + LINUX)\n"
@@ -911,6 +902,13 @@ def start_user_bot_process(user_id: int, bot_id: str) -> Tuple[bool, str]:
                 creationflags=creation_flags,
             )
 
+            # 🌸 CRITICAL FIX: Wait 3 seconds to ensure the bot actually starts
+            # if it crashes immediately, the runner.py will catch it and write to runtime.log
+            time.sleep(3)
+
+            if not is_pid_running(proc.pid):
+                return False, "🥀 Process crashed immediately upon launch. Check Live Logs for details."
+
             ACTIVE_PROCESSES[f"{user_id}:{bot_id}"] = proc
             bot_meta["pid"] = proc.pid
             bot_meta["status"] = "running"
@@ -931,6 +929,9 @@ def stop_user_bot_process(user_id: int, bot_id: str) -> Tuple[bool, str]:
         pid = bot_meta.get("pid")
         kill_process_tree(pid)
         ACTIVE_PROCESSES.pop(f"{user_id}:{bot_id}", None)
+
+        # 🌸 CRITICAL FIX: Wait for Telegram to drop the old connection before restarting
+        time.sleep(2)
 
         bot_meta["pid"] = None
         bot_meta["status"] = "stopped"
@@ -997,7 +998,6 @@ def watchdog_loop():
                         used_ram = tele["ram_mb_num"]
                         used_cpu = tele["cpu_num"]
 
-                        # 1. Per-Bot RAM Limit Enforcement (Works on Windows RDP & Linux)
                         if used_ram > max_ram_mb:
                             stop_user_bot_process(int(uid), bid)
                             bmeta["status"] = "oom_stopped"
@@ -1050,7 +1050,6 @@ def watchdog_loop():
                                     pass
                             continue
 
-                        # 2. Sustained High CPU Abuse Protection
                         if used_cpu > max_cpu_pct:
                             cpu_strike_tracker[proc_key] = cpu_strike_tracker.get(proc_key, 0) + 1
                             if cpu_strike_tracker[proc_key] >= 3:
@@ -1070,7 +1069,6 @@ def watchdog_loop():
                         else:
                             cpu_strike_tracker[proc_key] = 0
 
-                    # 3. Auto-Heal Normal Crashes
                     elif hosting_on and desired == "running" and not alive and auto_restart:
                         start_user_bot_process(int(uid), bid)
 
@@ -2078,9 +2076,6 @@ def handle_callbacks(call: telebot.types.CallbackQuery):
         call.data = "menu_my_bots"
         handle_callbacks(call)
 
-    # ========================================================================
-    # 🌸 SAKURA MASTER OWNER PANEL & SESSION TERMINATOR CALLBACKS
-    # ========================================================================
     elif data.startswith("owner_") or data.startswith("own_"):
         if int(uid) != SUPER_OWNER_ID:
             bot.answer_callback_query(call.id, f"🥀 Master Owner ({MASTER_OWNER_TAG}) Only!", show_alert=True)
