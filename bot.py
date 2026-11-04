@@ -1386,9 +1386,9 @@ def render_owner_single_user_session(target_uid: str) -> Tuple[str, InlineKeyboa
         )
 
     bots_section = "\n".join(bot_lines) if bot_lines else "<i>No bots currently hosted in this session.</i>"
-
+    uname = uinfo.get("username", "User")
     text = (
-        f"{sakura_header(f'👤 Session Inspector: {uinfo.get(\"username\")}')}\n\n"
+        f"{sakura_header(f'👤 Session Inspector: {uname}')}\n\n"
         f"👤 <b>Name:</b> {telebot.formatting.escape_html(uinfo.get('full_name', 'User'))}\n"
         f"🆔 <b>User ID / Owner ID:</b> <code>{target_uid}</code>\n"
         f"📂 <b>Workspace:</b> <code>workspaces/user_{target_uid}/</code>\n"
@@ -2018,6 +2018,7 @@ def handle_callbacks(call: telebot.types.CallbackQuery):
         else:
             log_tail = "Log file not generated yet."
 
+        bname = bmeta["bot_username"]
         kb = InlineKeyboardMarkup(row_width=2)
         kb.add(
             SakuraButton("🔄 Refresh Logs", callback_data=f"bot_logs:{bid}", style="success"),
@@ -2025,7 +2026,7 @@ def handle_callbacks(call: telebot.types.CallbackQuery):
             SakuraButton("🔙 Back to Bot", callback_data=f"bot_view:{bid}", style="primary"),
         )
         bot.edit_message_text(
-            f"{sakura_header(f'📜 Live Logs: @{bmeta[\"bot_username\"]}')}\n\n"
+            f"{sakura_header(f'📜 Live Logs: @{bname}')}\n\n"
             f"<pre>{telebot.formatting.escape_html(log_tail)}</pre>",
             chat_id,
             msg_id,
