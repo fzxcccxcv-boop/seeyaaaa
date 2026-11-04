@@ -1,0 +1,9 @@
+{
+  "user_id": 987654321,
+  "username": "@exampleuser",
+  "full_name": "Example User",
+  "default_owner_chat_id": 987654321,
+  "session_dir": "C:\\sidbotxhoster\\workspaces\\user_987654321",
+  "joined_at": "2026-11-04 15:30:00",
+  "bots": {}
+}
