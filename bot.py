@@ -645,7 +645,7 @@ def rotate_log_if_needed(log_path: str):
                 f.seek(-int(MAX_LOG_BYTES // 2), os.SEEK_END)
                 tail = f.read()
             with open(log_path, "wb") as f:
-                f.write(b"--- [🌸 Log Auto-Rotated by sidbotxhoster] ---\n" + tail)
+                f.write("--- [🌸 Log Auto-Rotated by sidbotxhoster] ---\n".encode("utf-8") + tail)
     except Exception:
         pass
 
