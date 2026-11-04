@@ -5,6 +5,7 @@ import sys
 import json
 import time
 import shutil
+import builtins
 import threading
 import subprocess
 import importlib.util
@@ -81,6 +82,20 @@ DEFAULT_PACKAGES_MAP_JSON = {
     "git": "GitPython",
 }
 
+TOKEN_REGEX = re.compile(r"(\d{5,16}:[A-Za-z0-9_-]{25,64})")
+
+
+def clean_invisible_chars(text: str) -> str:
+    if not text:
+        return ""
+    return re.sub(r"[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff\xa0]", "", text).strip()
+
+
+def extract_bot_token(text: str) -> Optional[str]:
+    cleaned = clean_invisible_chars(text)
+    match = TOKEN_REGEX.search(cleaned)
+    return match.group(1) if match else None
+
 
 def ensure_static_json_files() -> Tuple[Dict[str, Any], Dict[str, str]]:
     if not os.path.exists(CONFIG_FILE):
@@ -116,7 +131,7 @@ MAX_CPU_PERCENT_PER_BOT = float(CONFIG_DATA.get("max_cpu_percent_per_bot", 85.0)
 MAX_LOG_BYTES = int(CONFIG_DATA.get("max_log_bytes", 2 * 1024 * 1024))
 
 HOSTER_BOOT_TIME = time.time()
-bot = telebot.TeleBot(MASTER_BOT_TOKEN, parse_mode="HTML", threaded=True, num_threads=12)
+bot = telebot.TeleBot(MASTER_BOT_TOKEN, parse_mode="HTML", threaded=True, num_threads=16)
 
 USER_STATES: Dict[int, Dict[str, Any]] = {}
 ACTIVE_PROCESSES: Dict[str, subprocess.Popen] = {}
@@ -199,7 +214,8 @@ if os.name == "nt":
         pass
 
 # Auto-injected by {BOT_BRAND}
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "__BOT_TOKEN__")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("BOT_TOKEN", "")
+BOT_TOKEN = TELEGRAM_BOT_TOKEN
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 HOSTER_NAME = os.environ.get("HOSTER_NAME", "{BOT_BRAND}")
 MASTER_OWNER = os.environ.get("MASTER_OWNER", "{MASTER_OWNER_TAG}")
@@ -302,7 +318,6 @@ def cb_handler(call):
         )
 
 if __name__ == "__main__":
-    print(f"[🌸 Hosted Bot Online] Polling started for Owner ID {{OWNER_ID}}...")
     bot.infinity_polling(timeout=20, long_polling_timeout=10, skip_pending=True)
 '''
     with open(DEFAULT_MASTER_SCRIPT, "w", encoding="utf-8") as f:
@@ -428,6 +443,15 @@ class SakuraSessionManager:
             self._sync_user_workspace_json(data["users"][uid])
             return data["users"][uid]
 
+    def set_user_default_owner_id(self, user_id: int, owner_chat_id: int):
+        with self.lock:
+            data = self.load()
+            uid = str(user_id)
+            if uid in data["users"]:
+                data["users"][uid]["default_owner_chat_id"] = int(owner_chat_id)
+                self.save(data)
+                self._sync_user_workspace_json(data["users"][uid])
+
     def get_user(self, user_id: int) -> Optional[Dict[str, Any]]:
         return self.load()["users"].get(str(user_id))
 
@@ -497,7 +521,7 @@ def get_stdlib_modules() -> Set[str]:
         "traceback", "platform", "signal", "uuid", "tempfile", "zipfile",
         "tarfile", "gzip", "pickle", "struct", "ctypes", "enum", "dataclasses",
         "abc", "contextlib", "inspect", "importlib", "ast", "queue", "string",
-        "winreg", "msvcrt", "winsound", "ntpath", "__future__"
+        "winreg", "msvcrt", "winsound", "ntpath", "__future__", "builtins"
     })
     return stdlib
 
@@ -593,9 +617,10 @@ def validate_and_prepare_bot_token(
     owner_chat_id: int,
     apply_branding: bool = True,
 ) -> Tuple[bool, Optional[Dict[str, Any]], str, str]:
-    token = token.strip()
-    if not re.match(r"^\d{6,12}:[A-Za-z0-9_-]{30,50}$", token):
+    extracted = extract_bot_token(token)
+    if not extracted:
         return False, None, "Invalid token format. Expected `<bot_id>:<hash>`.", ""
+    token = extracted
 
     base_url = f"https://api.telegram.org/bot{token}"
     try:
@@ -659,6 +684,90 @@ def rotate_log_if_needed(log_path: str):
         pass
 
 
+def patch_master_script_code(raw_code: str, bot_token: str, owner_chat_id: int) -> Tuple[str, str]:
+    """
+    Safely patches token & owner ID assignments in master_script.py without
+    corrupting `if TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":` checks.
+    Returns (future_imports_header, patched_body).
+    """
+    future_lines: List[str] = []
+    patched_lines: List[str] = []
+
+    token_var_pattern = re.compile(
+        r"^(\s*(?:TELEGRAM_BOT_TOKEN|BOT_TOKEN|TOKEN|API_TOKEN|TELEGRAM_TOKEN|TG_BOT_TOKEN|TG_TOKEN|BOT_API_TOKEN|DIPESH_BOT_TOKEN|BOT_KEY)\s*(?::\s*[^=\n]+)?=\s*)(.+)$",
+        re.IGNORECASE,
+    )
+    owner_var_pattern = re.compile(
+        r"^(\s*(?:TELEGRAM_OWNER_ID|OWNER_ID|ADMIN_ID|OWNER|ADMIN|SUDO_ID|MASTER_ID|OWNER_CHAT_ID|ADMIN_CHAT_ID|BOT_OWNER_ID)\s*(?::\s*[^=\n]+)?=\s*)(?:[\"']?\d+[\"']?|None|os\.getenv\([^\n]+\)|os\.environ\.get\([^\n]+\))(.*)$",
+        re.IGNORECASE,
+    )
+    owner_list_pattern = re.compile(
+        r"^(\s*(?:OWNERS|ADMINS|ADMIN_IDS|OWNER_IDS|SUDO_USERS|AUTHORIZED_USERS)\s*(?::\s*[^=\n]+)?=\s*)\[\s*\d*(?:\s*,\s*\d+)*\s*\](.*)$",
+        re.IGNORECASE,
+    )
+
+    for line in raw_code.splitlines():
+        stripped = line.strip()
+
+        # Keep `from __future__ import ...` at the very top of runner.py
+        if re.match(r"^from\s+__future__\s+import\s+", stripped):
+            future_lines.append(line)
+            continue
+
+        # NEVER replace placeholder strings inside `if`, `elif`, `while`, `assert`, or `print` lines!
+        if re.match(r"^(?:if|elif|while|assert|raise|print)\b", stripped):
+            patched_lines.append(line)
+            continue
+
+        # 1. Direct assignment to TELEGRAM_BOT_TOKEN / BOT_TOKEN / etc.
+        m_tok = token_var_pattern.match(line)
+        if m_tok and "==" not in line:
+            prefix = m_tok.group(1)
+            patched_lines.append(f"{prefix}{json.dumps(bot_token)}")
+            continue
+
+        # 2. Direct assignment to OWNER_ID / ADMIN_ID / etc.
+        m_own = owner_var_pattern.match(line)
+        if m_own and "==" not in line:
+            patched_lines.append(f"{m_own.group(1)}{int(owner_chat_id)}{m_own.group(2)}")
+            continue
+
+        # 3. Direct assignment to ADMIN_IDS / SUDO_USERS list
+        m_list = owner_list_pattern.match(line)
+        if m_list and "==" not in line:
+            patched_lines.append(f"{m_list.group(1)}[{int(owner_chat_id)}]{m_list.group(2)}")
+            continue
+
+        # 4. Replace hardcoded bot tokens in non-conditional lines
+        line = re.sub(
+            r'(["\'])\d{5,16}:[A-Za-z0-9_-]{25,64}(["\'])',
+            lambda m: f"{m.group(1)}{bot_token}{m.group(2)}",
+            line,
+        )
+
+        # 5. Replace explicit placeholders on non-conditional assignment lines
+        if "=" in line:
+            for ph in ("__BOT_TOKEN__", "YOUR_BOT_TOKEN_HERE", "YOUR_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN", "PUT_YOUR_TOKEN_HERE"):
+                if ph in line:
+                    line = line.replace(ph, bot_token)
+            if "__OWNER_ID__" in line:
+                line = line.replace("__OWNER_ID__", str(owner_chat_id))
+
+        patched_lines.append(line)
+
+    body = "\n".join(patched_lines)
+
+    # Also patch dictionary config entries like `"TELEGRAM_BOT_TOKEN": ""`
+    body = re.sub(
+        r'(["\'](?:TELEGRAM_BOT_TOKEN|BOT_TOKEN|API_TOKEN|TELEGRAM_TOKEN|TG_BOT_TOKEN|bot_token|telegram_bot_token)["\']\s*:\s*)(?:["\'][^"\']*["\']|None)',
+        lambda m: f"{m.group(1)}{json.dumps(bot_token)}",
+        body,
+    )
+
+    future_header = ("\n".join(future_lines) + "\n") if future_lines else ""
+    return future_header, body
+
+
 def build_isolated_runner(
     master_script_path: str,
     target_workspace: str,
@@ -675,54 +784,25 @@ def build_isolated_runner(
     with open(src_path, "r", encoding="utf-8", errors="ignore") as f:
         raw_code = f.read()
 
-    # 1. Extract any `from __future__ import ...` lines so they stay at the very top of runner.py
-    future_lines: List[str] = []
-    remaining_lines: List[str] = []
-    for line in raw_code.splitlines():
-        if re.match(r"^\s*from\s+__future__\s+import\s+", line):
-            future_lines.append(line)
-        else:
-            remaining_lines.append(line)
-    patched = "\n".join(remaining_lines)
+    future_header, patched_body = patch_master_script_code(raw_code, bot_token, owner_chat_id)
 
-    # 2. Replace standard placeholders
-    for placeholder in ("__BOT_TOKEN__", "YOUR_BOT_TOKEN_HERE", "YOUR_BOT_TOKEN", "BOT_TOKEN_HERE"):
-        patched = patched.replace(placeholder, bot_token)
-    patched = patched.replace("__OWNER_ID__", str(owner_chat_id))
+    # Write a .env file in the workspace in case master_script.py uses python-dotenv
+    env_file_path = os.path.join(target_workspace, ".env")
+    with open(env_file_path, "w", encoding="utf-8") as ef:
+        ef.write(
+            f"TELEGRAM_BOT_TOKEN={bot_token}\n"
+            f"BOT_TOKEN={bot_token}\n"
+            f"TOKEN={bot_token}\n"
+            f"API_TOKEN={bot_token}\n"
+            f"TELEGRAM_TOKEN={bot_token}\n"
+            f"TG_BOT_TOKEN={bot_token}\n"
+            f"TG_TOKEN={bot_token}\n"
+            f"OWNER_ID={owner_chat_id}\n"
+            f"ADMIN_ID={owner_chat_id}\n"
+            f"TELEGRAM_OWNER_ID={owner_chat_id}\n"
+            f"SUDO_USERS={owner_chat_id}\n"
+        )
 
-    # 3. Replace ANY hardcoded Telegram Bot Token pattern anywhere in the script
-    patched = re.sub(
-        r'(["\'])\d{6,12}:[A-Za-z0-9_-]{30,50}(["\'])',
-        lambda m: f"{m.group(1)}{bot_token}{m.group(2)}",
-        patched,
-    )
-
-    # 4. Replace token variable assignments (case-insensitive, supports indentation & type hints)
-    patched = re.sub(
-        r'^(\s*(?:BOT_TOKEN|TOKEN|API_TOKEN|TELEGRAM_TOKEN|TG_TOKEN|BOT_KEY)\s*(?::\s*[^=]+)?=\s*)(?:["\'][^"\']*["\'])',
-        lambda m: f'{m.group(1)}"{bot_token}"',
-        patched,
-        flags=re.MULTILINE | re.IGNORECASE,
-    )
-
-    # 5. Replace Owner/Admin ID assignments (supports ints, strings, and single-item lists)
-    patched = re.sub(
-        r'^(\s*(?:OWNER_ID|ADMIN_ID|OWNER|ADMIN|SUDO_ID|MASTER_ID|OWNER_CHAT_ID)\s*(?::\s*[^=]+)?=\s*)(?:["\']?\d+["\']?)',
-        lambda m: f"{m.group(1)}{owner_chat_id}",
-        patched,
-        flags=re.MULTILINE | re.IGNORECASE,
-    )
-    patched = re.sub(
-        r'^(\s*(?:OWNERS|ADMINS|ADMIN_IDS|OWNER_IDS|SUDO_USERS)\s*(?::\s*[^=]+)?=\s*)\[\s*\d+(?:\s*,\s*\d+)*\s*\]',
-        lambda m: f"{m.group(1)}[{owner_chat_id}]",
-        patched,
-        flags=re.MULTILINE | re.IGNORECASE,
-    )
-
-    future_header = ("\n".join(future_lines) + "\n") if future_lines else ""
-
-    # 6. Runtime Bootstrap Header: Forces env vars, sys.path, unbuffered UTF-8 logs,
-    #    and hooks TeleBot / PTB / Aiogram / Pyrogram so the hosted token is ALWAYS used!
     bootstrap_header = (
         f"{future_header}"
         f"# =====================================================================\n"
@@ -730,7 +810,7 @@ def build_isolated_runner(
         f"# Hosted by {BOT_BRAND} | Master Owner: {MASTER_OWNER_TAG}\n"
         f"# Assigned Bot Owner Chat ID: {owner_chat_id} | RAM Cap: {max_ram_mb} MB\n"
         f"# =====================================================================\n"
-        f"import os as _sid_os, sys as _sid_sys\n"
+        f"import os as _sid_os, sys as _sid_sys, builtins as _sid_builtins\n"
         f"_sid_payload_dir = {json.dumps(PAYLOAD_DIR)}\n"
         f"if _sid_payload_dir not in _sid_sys.path:\n"
         f"    _sid_sys.path.insert(0, _sid_payload_dir)\n"
@@ -741,17 +821,27 @@ def build_isolated_runner(
         f"    pass\n"
         f"_SID_FORCED_TOKEN = {json.dumps(bot_token)}\n"
         f"_SID_FORCED_OWNER = {int(owner_chat_id)}\n"
-        f"_sid_os.environ['BOT_TOKEN'] = _SID_FORCED_TOKEN\n"
-        f"_sid_os.environ['TOKEN'] = _SID_FORCED_TOKEN\n"
-        f"_sid_os.environ['API_TOKEN'] = _SID_FORCED_TOKEN\n"
-        f"_sid_os.environ['TELEGRAM_TOKEN'] = _SID_FORCED_TOKEN\n"
-        f"_sid_os.environ['OWNER_ID'] = str(_SID_FORCED_OWNER)\n"
-        f"_sid_os.environ['ADMIN_ID'] = str(_SID_FORCED_OWNER)\n"
-        f"_sid_os.environ['SUDO_USERS'] = str(_SID_FORCED_OWNER)\n"
+        f"for _tk_key in ('TELEGRAM_BOT_TOKEN', 'BOT_TOKEN', 'TOKEN', 'API_TOKEN', 'TELEGRAM_TOKEN', 'TG_BOT_TOKEN', 'TG_TOKEN', 'BOT_API_TOKEN', 'DIPESH_BOT_TOKEN'):\n"
+        f"    _sid_os.environ[_tk_key] = _SID_FORCED_TOKEN\n"
+        f"    setattr(_sid_builtins, _tk_key, _SID_FORCED_TOKEN)\n"
+        f"for _ow_key in ('OWNER_ID', 'ADMIN_ID', 'TELEGRAM_OWNER_ID', 'TELEGRAM_ADMIN_ID', 'SUDO_ID', 'SUDO_USERS', 'OWNER_CHAT_ID', 'BOT_OWNER_ID'):\n"
+        f"    _sid_os.environ[_ow_key] = str(_SID_FORCED_OWNER)\n"
+        f"    setattr(_sid_builtins, _ow_key, _SID_FORCED_OWNER)\n"
         f"_sid_os.environ['HOSTER_NAME'] = {json.dumps(BOT_BRAND)}\n"
         f"_sid_os.environ['MASTER_OWNER'] = {json.dumps(MASTER_OWNER_TAG)}\n"
         f"_sid_os.environ['MAX_RAM_MB'] = {json.dumps(str(max_ram_mb))}\n"
-        f"# Runtime Hook: Ensure TeleBot / PTB / Aiogram always receive the hosted token\n"
+        f"# Hook os.getenv & os.environ.get so any *TOKEN* lookup always returns the hosted token\n"
+        f"_orig_getenv = _sid_os.getenv\n"
+        f"def _sid_patched_getenv(key, default=None):\n"
+        f"    val = _orig_getenv(key, default)\n"
+        f"    ku = str(key).upper()\n"
+        f"    if 'TOKEN' in ku and 'HOSTER' not in ku and (not val or 'YOUR_' in str(val).upper() or 'PASTE' in str(val).upper() or ':' not in str(val)):\n"
+        f"        return _SID_FORCED_TOKEN\n"
+        f"    if ('OWNER' in ku or 'ADMIN' in ku) and 'MASTER' not in ku and not val:\n"
+        f"        return str(_SID_FORCED_OWNER)\n"
+        f"    return val\n"
+        f"_sid_os.getenv = _sid_patched_getenv\n"
+        f"# Hook TeleBot, python-telegram-bot, and Aiogram constructors\n"
         f"try:\n"
         f"    import telebot as _sid_tb\n"
         f"    _orig_tb_init = _sid_tb.TeleBot.__init__\n"
@@ -776,11 +866,17 @@ def build_isolated_runner(
         f"    _sid_aio.Bot.__init__ = _patched_aio_init\n"
         f"except Exception:\n"
         f"    pass\n\n"
+        f"TELEGRAM_BOT_TOKEN = _SID_FORCED_TOKEN\n"
+        f"BOT_TOKEN = _SID_FORCED_TOKEN\n"
+        f"TOKEN = _SID_FORCED_TOKEN\n"
+        f"API_TOKEN = _SID_FORCED_TOKEN\n"
+        f"OWNER_ID = _SID_FORCED_OWNER\n"
+        f"ADMIN_ID = _SID_FORCED_OWNER\n\n"
     )
 
     runner_path = os.path.join(target_workspace, "runner.py")
     with open(runner_path, "w", encoding="utf-8") as f:
-        f.write(bootstrap_header + patched)
+        f.write(bootstrap_header + patched_body)
 
     session_meta_path = os.path.join(target_workspace, "session.json")
     with open(session_meta_path, "w", encoding="utf-8") as f:
@@ -883,74 +979,91 @@ def get_process_telemetry(pid: Optional[int], started_ts: Optional[float]) -> Di
 
 
 def start_user_bot_process(user_id: int, bot_id: str) -> Tuple[bool, str]:
-    with PROCESS_LOCK:
-        sys_cfg = db.get_system_config()
-        if not sys_cfg.get("hosting_enabled", True) and int(user_id) != SUPER_OWNER_ID:
-            return False, "🥀 Hoster is currently paused by the Master Owner."
+    sys_cfg = db.get_system_config()
+    if not sys_cfg.get("hosting_enabled", True) and int(user_id) != SUPER_OWNER_ID:
+        return False, "🥀 Hoster is currently paused by the Master Owner."
 
-        user_data = db.get_user(user_id)
-        if not user_data or str(bot_id) not in user_data["bots"]:
-            return False, "🥀 Bot session not found."
+    user_data = db.get_user(user_id)
+    if not user_data or str(bot_id) not in user_data["bots"]:
+        return False, "🥀 Bot session not found."
 
-        bot_meta = user_data["bots"][str(bot_id)]
-        current_pid = bot_meta.get("pid")
-        if is_pid_running(current_pid):
-            return True, f"🌸 @{bot_meta['bot_username']} is already running (PID: <code>{current_pid}</code>)."
+    bot_meta = user_data["bots"][str(bot_id)]
+    current_pid = bot_meta.get("pid")
+    if is_pid_running(current_pid):
+        return True, f"🌸 @{bot_meta['bot_username']} is already running (PID: <code>{current_pid}</code>)."
 
-        workspace = bot_meta["workspace"]
-        bot_token = bot_meta["token"]
-        owner_chat_id = int(bot_meta.get("owner_chat_id", user_id))
-        master_script = sys_cfg.get("master_script_path", DEFAULT_MASTER_SCRIPT)
+    workspace = bot_meta["workspace"]
+    bot_token = clean_invisible_chars(bot_meta["token"])
+    owner_chat_id = int(bot_meta.get("owner_chat_id", user_id))
+    master_script = sys_cfg.get("master_script_path", DEFAULT_MASTER_SCRIPT)
 
+    try:
         try:
-            try:
-                requests.post(
-                    f"https://api.telegram.org/bot{bot_token}/deleteWebhook",
-                    json={"drop_pending_updates": True},
-                    timeout=5,
-                )
-            except Exception:
-                pass
+            requests.post(
+                f"https://api.telegram.org/bot{bot_token}/deleteWebhook",
+                json={"drop_pending_updates": True},
+                timeout=5,
+            )
+        except Exception:
+            pass
 
-            runner_path = build_isolated_runner(
-                master_script_path=master_script,
-                target_workspace=workspace,
-                bot_token=bot_token,
-                owner_chat_id=owner_chat_id,
+        runner_path = build_isolated_runner(
+            master_script_path=master_script,
+            target_workspace=workspace,
+            bot_token=bot_token,
+            owner_chat_id=owner_chat_id,
+        )
+
+        log_path = os.path.join(workspace, "runtime.log")
+        rotate_log_if_needed(log_path)
+
+        log_fh = open(log_path, "a", encoding="utf-8", errors="replace", buffering=1)
+        log_fh.write(
+            f"\n--- [🌸 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+            f"Starting @{bot_meta['bot_username']} | Owner ID: {owner_chat_id} | "
+            f"Hosted by {BOT_BRAND} ({MASTER_OWNER_TAG}) ---\n"
+        )
+        log_fh.flush()
+
+        env = os.environ.copy()
+        for tk_key in (
+            "TELEGRAM_BOT_TOKEN",
+            "BOT_TOKEN",
+            "TOKEN",
+            "API_TOKEN",
+            "TELEGRAM_TOKEN",
+            "TG_BOT_TOKEN",
+            "TG_TOKEN",
+            "BOT_API_TOKEN",
+            "DIPESH_BOT_TOKEN",
+        ):
+            env[tk_key] = bot_token
+
+        for ow_key in (
+            "OWNER_ID",
+            "ADMIN_ID",
+            "TELEGRAM_OWNER_ID",
+            "TELEGRAM_ADMIN_ID",
+            "SUDO_ID",
+            "SUDO_USERS",
+            "OWNER_CHAT_ID",
+            "BOT_OWNER_ID",
+        ):
+            env[ow_key] = str(owner_chat_id)
+
+        env["HOSTER_NAME"] = BOT_BRAND
+        env["MASTER_OWNER"] = MASTER_OWNER_TAG
+        env["PYTHONUNBUFFERED"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+
+        creation_flags = 0
+        if IS_WINDOWS:
+            creation_flags = (
+                getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
             )
 
-            log_path = os.path.join(workspace, "runtime.log")
-            rotate_log_if_needed(log_path)
-
-            # Open runtime.log and pass handle directly to Popen so SyntaxErrors & tracebacks are captured
-            log_fh = open(log_path, "a", encoding="utf-8", errors="replace", buffering=1)
-            log_fh.write(
-                f"\n--- [🌸 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                f"Starting @{bot_meta['bot_username']} | Owner ID: {owner_chat_id} | "
-                f"Hosted by {BOT_BRAND} ({MASTER_OWNER_TAG}) ---\n"
-            )
-            log_fh.flush()
-
-            env = os.environ.copy()
-            env["BOT_TOKEN"] = bot_token
-            env["TOKEN"] = bot_token
-            env["API_TOKEN"] = bot_token
-            env["TELEGRAM_TOKEN"] = bot_token
-            env["OWNER_ID"] = str(owner_chat_id)
-            env["ADMIN_ID"] = str(owner_chat_id)
-            env["SUDO_USERS"] = str(owner_chat_id)
-            env["HOSTER_NAME"] = BOT_BRAND
-            env["MASTER_OWNER"] = MASTER_OWNER_TAG
-            env["PYTHONUNBUFFERED"] = "1"
-            env["PYTHONIOENCODING"] = "utf-8"
-
-            creation_flags = 0
-            if IS_WINDOWS:
-                creation_flags = (
-                    getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-                )
-
+        with PROCESS_LOCK:
             try:
                 proc = subprocess.Popen(
                     [sys.executable, "-u", runner_path],
@@ -962,34 +1075,35 @@ def start_user_bot_process(user_id: int, bot_id: str) -> Tuple[bool, str]:
                     creationflags=creation_flags,
                 )
             finally:
-                # Close parent's file descriptor so child owns it and Windows RDP never locks runtime.log
                 try:
                     log_fh.close()
                 except Exception:
                     pass
-
-            # Wait 2.5 seconds to verify the process doesn't crash on import/startup
-            time.sleep(2.5)
-
-            if not is_pid_running(proc.pid):
-                bot_meta["pid"] = None
-                bot_meta["status"] = "crashed"
-                db.add_or_update_bot(user_id, bot_id, bot_meta)
-                crash_tail = ""
-                if os.path.exists(log_path):
-                    with open(log_path, "r", encoding="utf-8", errors="ignore") as rf:
-                        crash_tail = "".join(rf.readlines()[-12:]).strip()[-600:]
-                err_detail = f"\n<pre>{telebot.formatting.escape_html(crash_tail)}</pre>" if crash_tail else ""
-                return False, f"🥀 Process crashed on startup. Check Live Logs:{err_detail}"
 
             ACTIVE_PROCESSES[f"{user_id}:{bot_id}"] = proc
             bot_meta["pid"] = proc.pid
             bot_meta["status"] = "running"
             bot_meta["started_at"] = time.time()
             db.add_or_update_bot(user_id, bot_id, bot_meta)
-            return True, f"🌸 Started @{bot_meta['bot_username']} (PID: <code>{proc.pid}</code>)"
-        except Exception as e:
-            return False, f"🥀 Failed to spawn process: {e}"
+
+        # Wait outside PROCESS_LOCK so other users & messages are never blocked
+        time.sleep(2.0)
+
+        if not is_pid_running(proc.pid):
+            with PROCESS_LOCK:
+                bot_meta["pid"] = None
+                bot_meta["status"] = "crashed"
+                db.add_or_update_bot(user_id, bot_id, bot_meta)
+            crash_tail = ""
+            if os.path.exists(log_path):
+                with open(log_path, "r", encoding="utf-8", errors="ignore") as rf:
+                    crash_tail = "".join(rf.readlines()[-10:]).strip()[-500:]
+            err_detail = f"\n<pre>{telebot.formatting.escape_html(crash_tail)}</pre>" if crash_tail else ""
+            return False, f"🥀 Process exited on startup. Check Live Logs:{err_detail}"
+
+        return True, f"🌸 Started @{bot_meta['bot_username']} (PID: <code>{proc.pid}</code>)"
+    except Exception as e:
+        return False, f"🥀 Failed to spawn process: {e}"
 
 
 def stop_user_bot_process(user_id: int, bot_id: str) -> Tuple[bool, str]:
@@ -1003,18 +1117,18 @@ def stop_user_bot_process(user_id: int, bot_id: str) -> Tuple[bool, str]:
         kill_process_tree(pid)
         ACTIVE_PROCESSES.pop(f"{user_id}:{bot_id}", None)
 
-        time.sleep(1.0)
-
         bot_meta["pid"] = None
         bot_meta["status"] = "stopped"
         bot_meta["started_at"] = None
         db.add_or_update_bot(user_id, bot_id, bot_meta)
-        return True, f"🥀 Stopped @{bot_meta['bot_username']} cleanly."
+
+    time.sleep(0.5)
+    return True, f"🥀 Stopped @{bot_meta['bot_username']} cleanly."
 
 
 def terminate_and_delete_bot_session(user_id: int, bot_id: str) -> Tuple[bool, str]:
+    stop_user_bot_process(user_id, bot_id)
     with PROCESS_LOCK:
-        stop_user_bot_process(user_id, bot_id)
         removed = db.remove_bot(user_id, bot_id)
         if not removed:
             return False, "🥀 Session already terminated."
@@ -1025,18 +1139,18 @@ def terminate_and_delete_bot_session(user_id: int, bot_id: str) -> Tuple[bool, s
 
 
 def terminate_entire_user_session(user_id: int) -> Tuple[int, str]:
+    uinfo = db.get_user(user_id)
+    if not uinfo:
+        return 0, "🥀 User session not found."
+    bots = list(uinfo.get("bots", {}).keys())
+    for bid in bots:
+        stop_user_bot_process(user_id, bid)
     with PROCESS_LOCK:
-        uinfo = db.get_user(user_id)
-        if not uinfo:
-            return 0, "🥀 User session not found."
-        bots = list(uinfo.get("bots", {}).keys())
-        for bid in bots:
-            stop_user_bot_process(user_id, bid)
         user_dir = uinfo.get("session_dir") or os.path.join(WORKSPACES_DIR, f"user_{user_id}")
         if os.path.exists(user_dir):
             windows_safe_rmtree(user_dir)
         db.delete_entire_user(user_id)
-        return len(bots), f"💥 Terminated user {user_id} and wiped {len(bots)} bot session(s)."
+    return len(bots), f"💥 Terminated user {user_id} and wiped {len(bots)} bot session(s)."
 
 
 # ============================================================================
@@ -1108,18 +1222,6 @@ def watchdog_loop():
                                 )
                             except Exception:
                                 pass
-
-                            if int(uid) != SUPER_OWNER_ID:
-                                try:
-                                    bot.send_message(
-                                        SUPER_OWNER_ID,
-                                        f"🛡️ <b>OOM Guard Killed a Runaway Bot</b>\n"
-                                        f"• <b>User:</b> {uinfo.get('username')} (<code>{uid}</code>)\n"
-                                        f"• <b>Bot:</b> @{bmeta['bot_username']} (<code>{bid}</code>)\n"
-                                        f"• <b>Peak RAM:</b> <code>{used_ram:.2f} MB / {max_ram_mb:.0f} MB</code>",
-                                    )
-                                except Exception:
-                                    pass
                             continue
 
                         if used_cpu > max_cpu_pct:
@@ -1516,6 +1618,16 @@ def deploy_bot_for_user(
         )
         return
 
+    extracted_token = extract_bot_token(bot_token)
+    if not extracted_token:
+        bot.send_message(
+            chat_id,
+            "🥀 <b>Invalid Bot Token Format!</b>\nPlease paste a valid token from @BotFather.",
+            reply_markup=build_main_menu(user.id),
+        )
+        return
+    bot_token = extracted_token
+
     max_slots = sys_cfg.get("max_bots_per_user", MAX_BOTS_PER_USER)
     current_bots = uinfo.get("bots", {})
 
@@ -1564,7 +1676,7 @@ def deploy_bot_for_user(
         "bot_id": bot_id,
         "bot_username": bot_username,
         "bot_first_name": bot_info.get("first_name", "Bot"),
-        "token": bot_token.strip(),
+        "token": bot_token,
         "owner_chat_id": int(owner_chat_id),
         "hosted_by": BOT_BRAND,
         "master_owner": MASTER_OWNER_TAG,
@@ -1791,7 +1903,8 @@ def handle_document_upload(message: telebot.types.Message):
 @bot.message_handler(content_types=["text"])
 def handle_text_input(message: telebot.types.Message):
     uid = message.from_user.id
-    text = (message.text or "").strip()
+    raw_text = message.text or ""
+    text = clean_invisible_chars(raw_text)
     state = USER_STATES.get(uid, {})
     mode = state.get("mode")
 
@@ -1818,16 +1931,22 @@ def handle_text_input(message: telebot.types.Message):
         )
         return
 
-    if mode == "await_chat_id":
-        token_match = re.search(r"(\d{6,12}:[A-Za-z0-9_-]{30,50})", text)
-        if token_match:
-            token = token_match.group(1)
-            prefix = text.replace(token, "").strip()
-            owner_cid = int(prefix) if prefix.lstrip("-").isdigit() else uid
-            USER_STATES.pop(uid, None)
-            deploy_bot_for_user(message.chat.id, message.from_user, owner_cid, token)
-            return
+    # Always prioritize direct Bot Token detection even if USER_STATES was cleared
+    detected_token = extract_bot_token(text)
+    if detected_token and mode in (None, "await_chat_id", "await_bot_token"):
+        uinfo = db.register_user(message.from_user)
+        remainder = text.replace(detected_token, "").strip().strip(":|,")
+        if remainder and remainder.lstrip("-").isdigit():
+            owner_cid = int(remainder)
+        elif state.get("owner_chat_id"):
+            owner_cid = int(state["owner_chat_id"])
+        else:
+            owner_cid = int(uinfo.get("default_owner_chat_id", uid))
+        USER_STATES.pop(uid, None)
+        deploy_bot_for_user(message.chat.id, message.from_user, owner_cid, detected_token)
+        return
 
+    if mode == "await_chat_id":
         if not text.lstrip("-").isdigit():
             bot.reply_to(
                 message,
@@ -1836,6 +1955,7 @@ def handle_text_input(message: telebot.types.Message):
             return
 
         owner_cid = int(text)
+        db.set_user_default_owner_id(uid, owner_cid)
         USER_STATES[uid] = {"mode": "await_bot_token", "owner_chat_id": owner_cid}
         kb = InlineKeyboardMarkup()
         kb.add(SakuraButton("✖️ Cancel", callback_data="menu_home", style="danger"))
@@ -1873,14 +1993,6 @@ def handle_text_input(message: telebot.types.Message):
                 f"🌸 <b>Updated Script Owner ID to <code>{new_owner_id}</code> & Restarted!</b>\n{msg}\n\n{card_text}",
                 reply_markup=card_kb,
             )
-        return
-
-    token_match = re.search(r"(\d{6,12}:[A-Za-z0-9_-]{30,50})", text)
-    if token_match:
-        token = token_match.group(1)
-        remainder = text.replace(token, "").strip().strip(":|,")
-        owner_cid = int(remainder) if remainder and remainder.lstrip("-").isdigit() else uid
-        deploy_bot_for_user(message.chat.id, message.from_user, owner_cid, token)
         return
 
     bot.send_message(
@@ -1945,6 +2057,7 @@ def handle_callbacks(call: telebot.types.CallbackQuery):
 
     elif data.startswith("host_use_my_id:"):
         owner_cid = int(data.split(":")[1])
+        db.set_user_default_owner_id(uid, owner_cid)
         USER_STATES[uid] = {"mode": "await_bot_token", "owner_chat_id": owner_cid}
         kb = InlineKeyboardMarkup()
         kb.add(SakuraButton("🔙 Cancel", callback_data="menu_home", style="danger"))
@@ -1961,7 +2074,6 @@ def handle_callbacks(call: telebot.types.CallbackQuery):
         bot.answer_callback_query(call.id, f"🌸 Owner ID set to {owner_cid}")
 
     elif data == "menu_my_bots":
-        USER_STATES.pop(uid, None)
         uinfo = db.register_user(call.from_user)
         bots = uinfo.get("bots", {})
         max_slots = db.get_system_config().get("max_bots_per_user", MAX_BOTS_PER_USER)
@@ -2118,14 +2230,17 @@ def handle_callbacks(call: telebot.types.CallbackQuery):
             SakuraButton("🧹 Clear Logs", callback_data=f"bot_clearlog:{bid}", style="danger"),
             SakuraButton("🔙 Back to Bot", callback_data=f"bot_view:{bid}", style="primary"),
         )
-        bot.edit_message_text(
-            f"{sakura_header(f'📜 Live Logs: @{bname}')}\n\n"
-            f"<pre>{telebot.formatting.escape_html(log_tail)}</pre>",
-            chat_id,
-            msg_id,
-            reply_markup=kb,
-        )
-        bot.answer_callback_query(call.id)
+        try:
+            bot.edit_message_text(
+                f"{sakura_header(f'📜 Live Logs: @{bname}')}\n\n"
+                f"<pre>{telebot.formatting.escape_html(log_tail)}</pre>",
+                chat_id,
+                msg_id,
+                reply_markup=kb,
+            )
+        except Exception:
+            pass
+        bot.answer_callback_query(call.id, "📜 Logs updated")
 
     elif data.startswith("bot_clearlog:"):
         bid = data.split(":")[1]
@@ -2225,7 +2340,7 @@ def handle_callbacks(call: telebot.types.CallbackQuery):
                 f"Send any <b>Python file (<code>.py</code>)</b>, <b><code>requirements.txt</code></b>, or <b><code>packages_map.json</code></b> in chat now.\n\n"
                 f"✨ <b>Real-Time Features on Upload:</b>\n"
                 f"• <b>AST Package Scanner:</b> Automatically detects missing imports in your <code>.py</code> file and installs them via <code>pip</code>.\n"
-                f"• <b>Dynamic Owner & Token Patching:</b> Injects each user's <code>BOT_TOKEN</code> and <code>OWNER_ID</code>.\n"
+                f"• <b>Dynamic Owner & Token Patching:</b> Injects <code>TELEGRAM_BOT_TOKEN</code>, <code>BOT_TOKEN</code>, and <code>OWNER_ID</code>.\n"
                 f"• <b>Auto Bot Bio Branding:</b> Sets hosted bots' descriptions to <code>Hosted by {BOT_BRAND} | Owner: {MASTER_OWNER_TAG}</code>.",
                 chat_id,
                 msg_id,
@@ -2493,7 +2608,8 @@ def restore_sessions_on_boot():
     restored = 0
     for uid, uinfo in data.get("users", {}).items():
         for bid, bmeta in uinfo.get("bots", {}).items():
-            if bmeta.get("status") == "running":
+            if bmeta.get("status") in ("running", "crashed"):
+                stop_user_bot_process(int(uid), bid)
                 ok, _ = start_user_bot_process(int(uid), bid)
                 if ok:
                     restored += 1
