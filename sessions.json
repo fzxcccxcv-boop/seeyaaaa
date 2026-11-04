@@ -1,0 +1,17 @@
+{
+  "system": {
+    "bot_name": "sidbotxhoster",
+    "master_owner": "@s1dfr",
+    "theme": "sakura",
+    "hosting_enabled": true,
+    "auto_restart": true,
+    "auto_pip_install": true,
+    "auto_brand_bots": true,
+    "colored_buttons": true,
+    "max_bots_per_user": 10,
+    "master_script_path": "engine_payload/master_script.py",
+    "total_deployments": 0,
+    "last_updated": "2026-11-04T15:14:00"
+  },
+  "users": {}
+}
